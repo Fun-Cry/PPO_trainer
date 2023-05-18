@@ -72,7 +72,7 @@ def worker(
             action_distribution = next_action_distribution
             # TODO: check whether to detach
 
-            if terminated or truncated:
+            if terminated:
                 state, info = env.reset()
                 state = torch.from_numpy(state).float()
                 action_distribution, value = old_policy(state.unsqueeze(0))
@@ -297,6 +297,31 @@ class PPO_trainer:
         finally:
             self.finish_handling(reward_plot)
 
+    def inference(self, num_episodes=5):
+        episode_count = 0
+        env = self.env_fn()
+        state, _ = env.reset()
+        state = torch.from_numpy(state).float()
+        action_distribution, value = self.old_policy(state.unsqueeze(0))
+
+        while episode_count <= num_episodes:
+            action = torch.multinomial(action_distribution, 1).item()
+
+            next_state, _, terminated, _ = env.step(action)[:4]
+            next_state = torch.from_numpy(next_state).float()
+
+            if terminated:
+                episode_count += 1
+                state, _ = env.reset()
+                state = torch.from_numpy(state).float()
+
+            else:
+                state = next_state
+
+            action_distribution, _ = self.old_policy(state.unsqueeze(0))
+
+        env.close()
+
 
 def env_fn():
     return gym.make("ALE/Alien-v5", render_mode="human")
@@ -304,11 +329,12 @@ def env_fn():
 
 def main():
     policy = AlienBot().to(device)
-    # policy.load_state_dict(torch.load("./model_larger.ckpt"))
+    # policy.load_state_dict(torch.load(f"./model.ckpt"))
     trainer = PPO_trainer(
-        policy, env_fn, num_workers=2, checkpoint_name="model_work_2.ckpt"
+        policy, env_fn, num_workers=1, checkpoint_name="model_work_large.ckpt"
     )
     trainer.train()
+    # trainer.inference()
 
 
 if __name__ == "__main__":

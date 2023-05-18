@@ -34,8 +34,8 @@ def worker(
     HORIZON=1024,
     GAMMA=0.99,
     LAMBDA=0.95,
-    sync_event=None,
     update_event=None,
+    Barrier=None,
     queue=None,
 ):
     np.random.seed(worker_id)
@@ -46,7 +46,7 @@ def worker(
 
         env = env_fn()
         state, info = env.reset()
-        state = torch.from_numpy(state).float().to(device)
+        state = torch.from_numpy(state).float()
         action_distribution, value = old_policy(state.unsqueeze(0))
 
         tau = []
@@ -57,7 +57,7 @@ def worker(
             action = torch.multinomial(action_distribution, 1).item()
 
             next_state, reward, terminated, truncated = env.step(action)[:4]
-            next_state = torch.from_numpy(next_state).float().to(device)
+            next_state = torch.from_numpy(next_state).float()
             next_action_distribution, next_value = old_policy(next_state.unsqueeze(0))
 
             tau_i = Experience(
@@ -74,7 +74,7 @@ def worker(
 
             if terminated or truncated:
                 state, info = env.reset()
-                state = torch.from_numpy(state).float().to(device)
+                state = torch.from_numpy(state).float()
                 action_distribution, value = old_policy(state.unsqueeze(0))
                 tau[-1].next_state = None
 
@@ -95,11 +95,11 @@ def worker(
             tau_i.reward = cur_delta_sum + value.detach()
 
         env.close()
-        if not queue:
+        if not Barrier:
             return tau
         else:
             queue.put(tau)
-            sync_event.set()
+            Barrier.wait()
 
 
 class PPO_trainer:
@@ -129,8 +129,9 @@ class PPO_trainer:
         self.env_fn = env_fn
 
         self.queue = mp_torch.Queue(maxsize=self.num_workers)
-        self.sync_events = [mp_torch.Event() for _ in range(self.num_workers)]
         self.update_event = mp_torch.Event()
+        self.Barrier = torch.multiprocessing.Barrier(self.num_workers + 1)
+
         self.processes = []
         self.policy = policy
         self.old_policy = deepcopy(policy)
@@ -148,21 +149,21 @@ class PPO_trainer:
         return [tau[i : i + batch_size] for i in range(0, len(tau), batch_size)]
 
     def worker_init(self):
-        for worker_id, sync_event in zip(range(self.num_workers), self.sync_events):
+        for worker_id in range(self.num_workers):
             # mp.set_start_method("spawn")
-
+            sampling_policy = self.old_policy.to(torch.device("cpu"))
             p = mp_torch.Process(
                 target=worker,
                 args=(
                     worker_id,
-                    self.old_policy,
+                    sampling_policy,
                     self.env_fn,
                     self.EPOCH,
                     self.HORIZON,
                     self.GAMMA,
                     self.LAMBDA,
-                    sync_event,
                     self.update_event,
+                    self.Barrier,
                     self.queue,
                 ),
             )
@@ -218,6 +219,9 @@ class PPO_trainer:
         )
         plt.plot(range(len(reward_plot)), reward_plot)
         plt.show()
+        if not os.path.exists("./graphs"):
+            os.mkdir("./graphs")
+        plt.savefig(f"./graphs/graph_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
 
     def single_worker_collect(self):
         tau = worker(
@@ -234,9 +238,7 @@ class PPO_trainer:
 
     def multi_worker_collect(self):
         self.update_event.set()
-        for e in self.sync_events:
-            e.wait()
-            e.clear()
+        self.Barrier.wait()
         self.update_event.clear()
 
         def parse_worker(cur_info, next_tau):
@@ -280,7 +282,7 @@ class PPO_trainer:
                 if self.save_all:
                     torch.save(
                         self.old_policy.state_dict(),
-                        f"{self.model_dir}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
+                        f"{self.model_dir}/model_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
                     )
                 else:
                     torch.save(
@@ -300,10 +302,10 @@ def env_fn():
 
 
 def main():
-    policy = AlienBot()
-    # policy.load_state_dict(torch.load("./model.ckpt"))
+    policy = AlienBot().to(device)
+    # policy.load_state_dict(torch.load("./model_larger.ckpt"))
     trainer = PPO_trainer(
-        policy, env_fn, num_workers=4, checkpoint_name="model_larger.ckpt"
+        policy, env_fn, num_workers=2, checkpoint_name="model_work_2.ckpt"
     )
     trainer.train()
 

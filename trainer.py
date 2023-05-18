@@ -270,6 +270,7 @@ class PPO_trainer:
                     if single_worker
                     else self.multi_worker_collect()
                 )
+                tqdm.write(f"Current reward: {tau_reward:.4f}")
                 reward_plot.append(tau_reward)
                 # ---------------------------------- update ---------------------------------- #
                 for batch in self.tau_batch(tau, batch_size=self.BATCH_SIZE):

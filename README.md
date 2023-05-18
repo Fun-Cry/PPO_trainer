@@ -27,7 +27,7 @@ Before running the script, make sure to prepare your environment accordingly:
 4. Install the required Gym environment. For example, if you want to use the "Alien-v5" environment, you can install it using the following command:
 
    ```shell
-   pip install "gymnasium[atari, accept-rom-license]"
+   pip install gymnasium[atari,accept-rom-license]
    ```
 
 ## Usage

@@ -219,34 +219,57 @@ class PPO_trainer:
         plt.plot(range(len(reward_plot)), reward_plot)
         plt.show()
 
-    def train_multiworker(self):
-        optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.LR)
-        reward_plot = []
-        self.worker_init()
+    def single_worker_collect(self):
+        tau = worker(
+            1,
+            self.old_policy,
+            self.env_fn,
+            self.EPOCH,
+            self.HORIZON,
+            self.GAMMA,
+            self.LAMBDA,
+        )
+        tau_reward = tau[0].reward.squeeze(1).item()
+        return tau, tau_reward
+
+    def multi_worker_collect(self):
+        self.update_event.set()
+        for e in self.sync_events:
+            e.wait()
+            e.clear()
+        self.update_event.clear()
+
+        def parse_worker(cur_info, next_tau):
+            tau_list, reward_tensor = cur_info
+            return tau_list + next_tau, torch.cat(
+                (reward_tensor, next_tau[0].reward), dim=0
+            )
+
+        tau, tau_reward = functools.reduce(
+            parse_worker,
+            (self.queue.get() for _ in range(self.num_workers)),
+            ([], torch.tensor([])),
+        )
+        tau_reward = tau_reward.squeeze(1).mean().item()
+
+        return tau, tau_reward
+
+    def train(self):
+        single_worker = self.num_workers == 1
+        if not single_worker:
+            self.worker_init()
         try:
-            for epoch in tqdm(range(self.EPOCH), desc="Epoch"):
+            optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.LR)
+            reward_plot = []
+            for _ in tqdm(range(self.EPOCH), desc="Epoch"):
                 # ---------------------------------- collect --------------------------------- #
-                self.update_event.set()
-                for e in self.sync_events:
-                    e.wait()
-                    e.clear()
-                self.update_event.clear()
-
-                def parse_worker(cur_info, next_tau):
-                    tau_list, reward_tensor = cur_info
-                    return tau_list + next_tau, torch.cat(
-                        (reward_tensor, next_tau[0].reward), dim=0
-                    )
-
-                tau, tau_reward = functools.reduce(
-                    parse_worker,
-                    (self.queue.get() for _ in range(self.num_workers)),
-                    ([], torch.tensor([])),
+                tau, tau_reward = (
+                    self.single_worker_collect()
+                    if single_worker
+                    else self.multi_worker_collect()
                 )
-                reward_plot.append(tau_reward.squeeze(1).mean().item())
+                reward_plot.append(tau_reward)
                 # ---------------------------------- update ---------------------------------- #
-
-                # print(f"updating with {len(tau)} trajectories")
                 for batch in self.tau_batch(tau, batch_size=self.BATCH_SIZE):
                     batch_info = self.tensor_transform(batch)
                     total_loss = self.loss_CLIP_VF_S(*batch_info)
@@ -271,43 +294,6 @@ class PPO_trainer:
         finally:
             self.finish_handling(reward_plot)
 
-    def train(self):
-        if self.num_workers > 1:
-            self.train_multiworker()
-        else:
-            optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.LR)
-            reward_plot = []
-            for _ in tqdm(range(self.EPOCH), desc="Epoch"):
-                # ---------------------------------- collect --------------------------------- #
-                tau = worker(
-                    1,
-                    self.old_policy,
-                    self.env_fn,
-                    self.EPOCH,
-                    self.HORIZON,
-                    self.GAMMA,
-                    self.LAMBDA,
-                )
-                reward_plot.append(tau[0].reward.squeeze(1).item())
-                # ---------------------------------- update ---------------------------------- #
-                for batch in self.tau_batch(tau, batch_size=self.BATCH_SIZE):
-                    batch_info = self.tensor_transform(batch)
-                    total_loss = self.loss_CLIP_VF_S(*batch_info)
-                    optimizer.zero_grad()
-                    total_loss.backward()
-                    optimizer.step()
-                self.old_policy.load_state_dict(self.policy.state_dict())
-                if self.save_all:
-                    torch.save(
-                        self.old_policy.state_dict(),
-                        f"{self.model_dir}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
-                    )
-                else:
-                    torch.save(
-                        self.old_policy.state_dict(),
-                        f"{self.model_dir}/{self.checkpoint_name}",
-                    )
-
 
 def env_fn():
     return gym.make("ALE/Alien-v5", render_mode="human")
@@ -315,8 +301,10 @@ def env_fn():
 
 def main():
     policy = AlienBot()
-    policy.load_state_dict(torch.load("./model.ckpt"))
-    trainer = PPO_trainer(policy, env_fn, num_workers=1)
+    # policy.load_state_dict(torch.load("./model.ckpt"))
+    trainer = PPO_trainer(
+        policy, env_fn, num_workers=4, checkpoint_name="model_larger.ckpt"
+    )
     trainer.train()
 
 

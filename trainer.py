@@ -1,5 +1,8 @@
 import gymnasium as gym
+
 from model import AlienBot
+
+# from large_model import AlienBot
 import torch
 from copy import deepcopy
 from torch.distributions import Categorical
@@ -103,7 +106,7 @@ def worker(
 
 
 class PPO_trainer:
-    ALPHA = 0.5
+    ALPHA = 1
     EPOCH = 500
     HORIZON = 1024
     BATCH_SIZE = 128
@@ -223,6 +226,11 @@ class PPO_trainer:
             os.mkdir("./graphs")
         plt.savefig(f"./graphs/graph_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
 
+    def anneal_parameter(self):
+        self.ALPHA -= 1 / self.EPOCH
+        self.CLIP_PARAM = 0.1 * self.ALPHA
+        self.LR = 3 * 10e-4 * self.ALPHA
+
     def single_worker_collect(self):
         tau = worker(
             1,
@@ -279,6 +287,7 @@ class PPO_trainer:
                     optimizer.zero_grad()
                     total_loss.backward()
                     optimizer.step()
+                self.anneal_parameter()
                 self.old_policy.load_state_dict(self.policy.state_dict())
                 if self.save_all:
                     torch.save(
@@ -329,9 +338,9 @@ def env_fn():
 
 def main():
     policy = AlienBot().to(device)
-    # policy.load_state_dict(torch.load(f"./model.ckpt"))
+    # policy.load_state_dict(torch.load(f"./model_large.ckpt"))
     trainer = PPO_trainer(
-        policy, env_fn, num_workers=1, checkpoint_name="model_work_large.ckpt"
+        policy, env_fn, num_workers=1, checkpoint_name="model_work_off.ckpt"
     )
     trainer.train()
     # trainer.inference()

@@ -40,7 +40,6 @@ def worker(
 ):
     np.random.seed(worker_id)
     torch.manual_seed(worker_id)
-    old_policy.eval()
     for _ in range(EPOCH):
         if update_event is not None:
             update_event.wait()
@@ -106,7 +105,7 @@ def worker(
 class PPO_trainer:
     ALPHA = 1
     EPOCH = 500
-    HORIZON = 1024
+    HORIZON = 100
     BATCH_SIZE = 128
     GAMMA = 0.99
     LAMBDA = 0.95
@@ -135,10 +134,7 @@ class PPO_trainer:
 
         self.processes = []
         self.policy = policy
-        self.old_policy = deepcopy(policy)
-
-        for param in self.old_policy.parameters():
-            param.requires_grad = False
+        self.old_policy = deepcopy(policy).to(torch.device("cpu")).eval()
 
         self.model_dir = model_dir
         self.checkpoint_name = checkpoint_name
@@ -271,7 +267,8 @@ class PPO_trainer:
         if not single_worker:
             self.worker_init()
         try:
-            optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.LR)
+            max_reward = 0
+            optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.LR, eps=1e-5)
             reward_plot = []
             for _ in tqdm(range(self.EPOCH), desc="Epoch"):
                 # ---------------------------------- collect --------------------------------- #
@@ -282,6 +279,12 @@ class PPO_trainer:
                 )
                 tqdm.write(f"Current reward: {tau_reward:.4f}")
                 reward_plot.append(tau_reward)
+                if tau_reward > max_reward:
+                    torch.save(
+                        self.old_policy.state_dict(),
+                        f"{self.model_dir}/model_{self.checkpoint_name}_{tau_reward}.ckpt",
+                    )
+                    max_reward = tau_reward
                 # ---------------------------------- update ---------------------------------- #
                 for batch in self.tau_batch(tau, batch_size=self.BATCH_SIZE):
                     batch_info = self.tensor_transform(batch)
@@ -294,12 +297,12 @@ class PPO_trainer:
                 if self.save_all:
                     torch.save(
                         self.old_policy.state_dict(),
-                        f"{self.model_dir}/model_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
+                        f"{self.model_dir}/model_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S').ckpt}",
                     )
                 else:
                     torch.save(
                         self.old_policy.state_dict(),
-                        f"{self.model_dir}/{self.checkpoint_name}",
+                        f"{self.model_dir}/{self.checkpoint_name}.ckpt",
                     )
         except KeyboardInterrupt:
             print("Performing graceful shutdown...")
@@ -340,10 +343,10 @@ def env_fn():
 
 def main():
     policy = AlienBot().to(device)
-    # policy.load_state_dict(torch.load(f"./model_friday_mid.ckpt"))
-    trainer = PPO_trainer(policy, env_fn, num_workers=1, checkpoint_name="model.ckpt")
-    trainer.train()
-    # trainer.inference()
+    # policy.load_state_dict(torch.load(f"./model 112.ckpt"))
+    trainer = PPO_trainer(policy, env_fn, num_workers=1, checkpoint_name="model")
+    # trainer.train()
+    trainer.inference()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,5 @@
 import gymnasium as gym
-
 from model import AlienBot
-
-# from large_model import AlienBot
 import torch
 from copy import deepcopy
 from torch.distributions import Categorical
@@ -33,7 +30,7 @@ def worker(
     worker_id,
     old_policy,
     env_fn,
-    EPOCH=1000,
+    EPOCH=1024,
     HORIZON=1024,
     GAMMA=0.99,
     LAMBDA=0.95,
@@ -43,13 +40,14 @@ def worker(
 ):
     np.random.seed(worker_id)
     torch.manual_seed(worker_id)
+    old_policy.eval()
     for _ in range(EPOCH):
         if update_event is not None:
             update_event.wait()
 
         env = env_fn()
         state, info = env.reset()
-        state = torch.from_numpy(state).float()
+        state = torch.from_numpy(state).float() / 255.0  # normalize
         action_distribution, value = old_policy(state.unsqueeze(0))
 
         tau = []
@@ -60,7 +58,7 @@ def worker(
             action = torch.multinomial(action_distribution, 1).item()
 
             next_state, reward, terminated, truncated = env.step(action)[:4]
-            next_state = torch.from_numpy(next_state).float()
+            next_state = torch.from_numpy(next_state).float() / 255.0
             next_action_distribution, next_value = old_policy(next_state.unsqueeze(0))
 
             tau_i = Experience(
@@ -75,9 +73,9 @@ def worker(
             action_distribution = next_action_distribution
             # TODO: check whether to detach
 
-            if terminated:
+            if terminated or truncated:
                 state, info = env.reset()
-                state = torch.from_numpy(state).float()
+                state = torch.from_numpy(state).float() / 255.0
                 action_distribution, value = old_policy(state.unsqueeze(0))
                 tau[-1].next_state = None
 
@@ -175,12 +173,6 @@ class PPO_trainer:
 
     def tensor_transform(self, batch):
         states = torch.stack([tau_i.state.to(device) for tau_i in batch]).to(device)
-        rewards = torch.tensor(
-            [tau_i.reward for tau_i in batch], dtype=torch.float32
-        ).to(device)
-        advantages = torch.tensor(
-            [tau_i.advantage for tau_i in batch], dtype=torch.float32
-        ).to(device)
         action_probs = torch.stack([tau_i.action_prob for tau_i in batch]).to(device)
         actions = (
             torch.tensor([tau_i.action for tau_i in batch], dtype=torch.int64)
@@ -188,15 +180,25 @@ class PPO_trainer:
             .to(device)
         )
 
-        return states, rewards, advantages, action_probs, actions
+        rewards = torch.tensor(
+            [tau_i.reward for tau_i in batch], dtype=torch.float32
+        ).to(device)
+        advantages = torch.tensor(
+            [tau_i.advantage for tau_i in batch], dtype=torch.float32
+        ).to(device)
+        advantages = (advantages - advantages.mean()) / (
+            advantages.std() + 1e-8
+        )  # standardization
+
+        return states, action_probs, actions, rewards, advantages
 
     def loss_CLIP_VF_S(
         self,
         states,
-        rewards,
-        advantages,
         action_probs,
         actions,
+        rewards,
+        advantages,
     ):
         theta_distributions, values = self.policy(states)
         theta_probs = theta_distributions.gather(1, actions).squeeze(1)
@@ -234,7 +236,7 @@ class PPO_trainer:
     def single_worker_collect(self):
         tau = worker(
             1,
-            self.old_policy,
+            self.old_policy.to(torch.device("cpu")),
             self.env_fn,
             self.EPOCH,
             self.HORIZON,
@@ -310,19 +312,19 @@ class PPO_trainer:
         episode_count = 0
         env = self.env_fn()
         state, _ = env.reset()
-        state = torch.from_numpy(state).float()
+        state = torch.from_numpy(state).float() / 255.0
         action_distribution, value = self.old_policy(state.unsqueeze(0))
 
         while episode_count <= num_episodes:
             action = torch.multinomial(action_distribution, 1).item()
 
-            next_state, _, terminated, _ = env.step(action)[:4]
-            next_state = torch.from_numpy(next_state).float()
+            next_state, _, terminated, truncated = env.step(action)[:4]
+            next_state = torch.from_numpy(next_state).float() / 255.0
 
-            if terminated:
+            if terminated or truncated:
                 episode_count += 1
                 state, _ = env.reset()
-                state = torch.from_numpy(state).float()
+                state = torch.from_numpy(state).float() / 255.0
 
             else:
                 state = next_state
@@ -338,10 +340,8 @@ def env_fn():
 
 def main():
     policy = AlienBot().to(device)
-    # policy.load_state_dict(torch.load(f"./model_large.ckpt"))
-    trainer = PPO_trainer(
-        policy, env_fn, num_workers=1, checkpoint_name="model_work_off.ckpt"
-    )
+    # policy.load_state_dict(torch.load(f"./model_friday_mid.ckpt"))
+    trainer = PPO_trainer(policy, env_fn, num_workers=1, checkpoint_name="model.ckpt")
     trainer.train()
     # trainer.inference()
 
